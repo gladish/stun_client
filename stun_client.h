@@ -33,8 +33,6 @@ class message_factory;
 
 using buffer = std::vector<uint8_t>;
 
-static size_t constexpr transaction_id_length = 16;
-
 namespace message_type {
   static uint16_t constexpr binding_request = 0x001;
   static uint16_t constexpr binding_response = 0x0101;
@@ -46,8 +44,16 @@ namespace message_type {
 
 namespace attribute_type {
   static uint16_t constexpr mapped_address = 0x001;
+  static uint16_t constexpr response_address = 0x0002;
+  static uint16_t constexpr change_request = 0x0003;
   static uint16_t constexpr source_address = 0x004;
   static uint16_t constexpr changed_address = 0x005;
+  static uint16_t constexpr username = 0x0006;
+  static uint16_t constexpr password = 0x0007;
+  static uint16_t constexpr message_integrity = 0x0008;
+  static uint16_t constexpr error_code = 0x0009;
+  static uint16_t constexpr unknown_attributes = 0x000a;
+  static uint16_t constexpr reflected_from = 0x000b;
 }
 
 struct attribute {
@@ -57,14 +63,23 @@ struct attribute {
 };
 
 namespace attributes {
-  class mapped_address {
-    public:
-      mapped_address(attribute const & attr);
-      inline sockaddr_storage addr() const {
-        return m_addr;
-      }
-    private:
-      sockaddr_storage m_addr;
+  class address {
+  public:
+    address(attribute const & attr);
+    inline sockaddr_storage addr() const {
+      return m_addr;
+    }
+  private:
+    sockaddr_storage m_addr;
+  };
+  struct mapped_address : public address {
+    mapped_address(attribute const & attr) : address(attr) { }
+  };
+  struct source_address : public address {
+    source_address(attribute const & attr) : address(attr) { }
+  };
+  struct changed_address : public address {
+    changed_address(attribute const & attr) : address(attr) { }
   };
 }
 
@@ -72,7 +87,6 @@ struct message_header {
   uint16_t message_type;
   uint16_t message_length;
   std::array<uint8_t, 16> transaction_id;
-//  uint8_t transaction_id[transaction_id_length];
 };
 
 class message {
@@ -98,9 +112,7 @@ class decoder final {
 public:
   static uint16_t decode_u16(buffer const & buff, size_t * offset);
   static uint32_t decode_u32(buffer const & buff, size_t * offset);
-
   static message * decode_message(buffer const & buff, size_t * offset);
-
   static attribute decode_attr(buffer const & buff, size_t * offset);
 };
 

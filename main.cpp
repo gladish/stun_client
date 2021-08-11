@@ -115,7 +115,7 @@ int main(int argc, char * argv[])
     std::cout << "you need to supply stun server hostname and port" << std::endl;
     std::cout << "try one of these" << std::endl;
     for (stun_server const & s : default_stun_servers)
-      std::cout << "\t-h " << s.hostname << " -p " << s.port << std::endl;
+      std::cout << "\t-s " << s.hostname << " -p " << s.port << std::endl;
     std::cout << std::endl;
     exit(0);
   }

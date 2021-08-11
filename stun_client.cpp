@@ -26,17 +26,22 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <exception>
 #include <limits>
 #include <memory>
 #include <random>
 #include <set>
 #include <sstream>
+#include <thread>
 
 // #define _STUN_DEBUG 1
 
 namespace stun {
 namespace details {
+  static int constexpr binding_requests_max = 9;
+  static std::chrono::milliseconds binding_requests_wait_time_max(1600);
+
   class file_descriptor {
   public:
     file_descriptor(int n) : m_fd(n) { }
@@ -201,7 +206,11 @@ namespace details {
     return 0;
   }
 
-  stun::message * send_message(file_descriptor const & soc, sockaddr_storage const & remote_addr, stun::message const & req)
+  stun::message * send_message(
+    file_descriptor const & soc,
+    sockaddr_storage const & remote_addr,
+    stun::message const & req,
+    std::chrono::milliseconds const & wait_time)
   {
     stun::buffer bytes = req.encode();
 
@@ -222,7 +231,16 @@ namespace details {
     sockaddr_storage from_addr = {};
     socklen_t len = sizeof(sockaddr_storage);
 
-    // TODO : public select with timeout
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(soc, &rfds);
+
+    timeval timeout;
+    timeout.tv_usec = 1000 * wait_time.count();
+    timeout.tv_sec = 0;
+    int ret = select(soc + 1, &rfds, nullptr, nullptr, &timeout);
+    if (ret == 0)
+      return nullptr;
 
     do {
       n = recvfrom(soc, &bytes[0], bytes.size(), MSG_WAITALL, (sockaddr *) &from_addr, &len);
@@ -309,15 +327,21 @@ bool stun::client::exec(std::string const & stun_server, uint16_t stun_port, std
 
   std::vector<sockaddr_storage> server_addresses = stun::details::resolve_hostname(stun_server, stun_port);
   for (sockaddr_storage const & addr : server_addresses) {
-    // only allowing v4 
     if (addr.ss_family != inet_family)
       continue;
 
-    stun::details::file_descriptor soc = stun::details::create_udp_socket(addr, local_iface);
-    std::unique_ptr<stun::message> binding_request(stun::message_factory::create_binding_request());
-    std::unique_ptr<stun::message> binding_response(send_message(soc, addr, *binding_request));
-    if (!binding_response)
-      continue;
+    std::chrono::milliseconds wait_time(250);
+    std::unique_ptr<stun::message> binding_response;
+
+    for (int i = 0; i < details::binding_requests_max; ++i) {
+      stun::details::file_descriptor soc = stun::details::create_udp_socket(addr, local_iface);
+      std::unique_ptr<stun::message> binding_request(stun::message_factory::create_binding_request());
+      binding_response.reset(send_message(soc, addr, *binding_request, wait_time));
+      if (binding_response)
+        break;
+      else
+        wait_time = std::min(wait_time * 2, details::binding_requests_wait_time_max);
+    }
 
     for (stun::attribute const & attr : binding_response->attributes()) {
       if (attr.type == stun::attribute_type::mapped_address) {
@@ -331,7 +355,7 @@ bool stun::client::exec(std::string const & stun_server, uint16_t stun_port, std
   return found_public_address;
 }
 
-stun::attributes::mapped_address::mapped_address(stun::attribute const & attr)
+stun::attributes::address::address(stun::attribute const & attr)
 {
   size_t offset = 0;
 
@@ -387,7 +411,7 @@ stun::message * stun::decoder::decode_message(buffer const & buff, size_t * offs
   header.message_type = stun::decoder::decode_u16(buff, &temp_offset);
   header.message_length = stun::decoder::decode_u16(buff, &temp_offset);
   if (header.message_type == stun::message_type::binding_response) {
-    for (size_t i = 0; i < stun::transaction_id_length; ++i)
+    for (size_t i = 0, n = header.transaction_id.size(); i < n; ++i)
       header.transaction_id[i] = buff[temp_offset++ + i];
     message = new stun::message();
     message->m_header = header;
