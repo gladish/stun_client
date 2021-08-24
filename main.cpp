@@ -22,11 +22,6 @@
 #include <algorithm>
 #include <iostream>
 
-struct stun_server {
-  std::string hostname;
-  uint16_t    port;
-};
-
 uint16_t to_uint16(char const * s)
 {
   long int i = strtol(s, nullptr, 10);
@@ -59,9 +54,9 @@ int main(int argc, char * argv[])
 {
   bool verbose = false;
   std::string local_iface;
-  stun_server remote_server;
+  stun::server remote_server;
 
-  std::vector< stun_server > default_stun_servers = {
+  std::vector< stun::server > default_stun_servers = {
     { "stun1.l.google.com", 19302 },
     { "stun2.l.google.com", 19302 },
     { "stun3.l.google.com", 19302 },
@@ -114,24 +109,38 @@ int main(int argc, char * argv[])
     print_help();
     std::cout << "you need to supply stun server hostname and port" << std::endl;
     std::cout << "try one of these" << std::endl;
-    for (stun_server const & s : default_stun_servers)
+    for (stun::server const & s : default_stun_servers)
       std::cout << "\t-s " << s.hostname << " -p " << s.port << std::endl;
     std::cout << std::endl;
     exit(0);
   }
 
+  int return_status = 0;
   stun::client client;
 
   try {
-    if (client.exec(remote_server.hostname, remote_server.port, local_iface)) {
-      sockaddr_storage wan_addr = client.public_address();
-      std::cout << remote_server.hostname << " says:" << stun::sockaddr_to_string(wan_addr)
-        << std::endl;
+    std::unique_ptr<stun::message> binding_response = client.send_binding_request(remote_server,
+      local_iface);
+    if (binding_response) {
+      stun::attribute const * mapped_address = binding_response->find_attribute(
+        stun::attribute_type::mapped_address);
+      if (mapped_address) {
+        sockaddr_storage wan_addr = stun::attributes::mapped_address(*mapped_address).addr();
+        std::cout << remote_server.hostname << " says:" << stun::sockaddr_to_string(wan_addr)
+          << std::endl;
+      } else {
+        std::cerr << "Got a binding response without any mapped address" << std::endl;
+        return_status = 1;
+      }
+    } else {
+      std::cerr << "No binding response" << std::endl;
+      return_status = 2;
     }
   }
   catch (std::exception const & err) {
     std::cerr << "exception:" << err.what() << std::endl;
+    return_status = 3;
   }
 
-  return 0;
+  return return_status;
 }

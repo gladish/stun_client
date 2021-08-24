@@ -18,6 +18,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -98,6 +99,9 @@ public:
   inline std::vector<attribute> const & attributes() const {
     return m_attrs;
   }
+
+  attribute const * find_attribute(uint16_t attr_type) const;
+
 private:
   message_header  m_header;
   std::vector<attribute> m_attrs;
@@ -110,10 +114,10 @@ public:
 
 class decoder final {
 public:
-  static uint16_t decode_u16(buffer const & buff, size_t * offset);
-  static uint32_t decode_u32(buffer const & buff, size_t * offset);
-  static message * decode_message(buffer const & buff, size_t * offset);
+  static uint16_t  decode_u16(buffer const & buff, size_t * offset);
+  static uint32_t  decode_u32(buffer const & buff, size_t * offset);
   static attribute decode_attr(buffer const & buff, size_t * offset);
+  static message * decode_message(buffer const & buff, size_t * offset);
 };
 
 class encoder final {
@@ -122,19 +126,21 @@ public:
   static void encode_u32(buffer & buff, uint32_t n);
 };
 
+struct server {
+  std::string hostname;
+  uint16_t port;
+};
+
 class client {
 public:
-  bool exec(std::string const & stun_server, uint16_t stun_port, std::string const & local_iface = {});
-  inline sockaddr_storage public_address() const {
-    return m_public_address;
-  }
+  std::unique_ptr<message> send_binding_request(server const & server, std::string const & local_iface = {});
+
   inline void set_verbose(bool b) {
     m_verbose = b;
   }
 private:
   void verbose(char const * format, ...) __attribute__((format(printf, 2, 3)));
 private:
-  sockaddr_storage m_public_address;
   bool m_verbose = { false };
 };
 
