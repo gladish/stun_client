@@ -17,6 +17,7 @@
 #define STUN_CLIENT_H
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -33,6 +34,16 @@ class message;
 class message_factory;
 
 using buffer = std::vector<uint8_t>;
+
+enum class nat_type {
+  udp_blocked,
+  open_internet,
+  full_cone,
+  symmetric,
+  restricted,
+  port_resricted,
+  unknown
+};
 
 namespace message_type {
   static uint16_t constexpr binding_request = 0x001;
@@ -133,15 +144,31 @@ struct server {
 
 class client {
 public:
-  std::unique_ptr<message> send_binding_request(server const & server, std::string const & local_iface = {});
+  client(std::string const & local_iface);
+  ~client();
+
+  std::unique_ptr<message> send_binding_request(server const & srv);
+
+  nat_type do_discovery(server const & srv);
 
   inline void set_verbose(bool b) {
     m_verbose = b;
   }
 private:
   void verbose(char const * format, ...) __attribute__((format(printf, 2, 3)));
+  void create_udp_socket(int inet_family);
+
+  std::unique_ptr<message> send_binding_request(sockaddr_storage const & addr,
+    std::chrono::milliseconds const & wait_time);
+
+  message * send_message(sockaddr_storage const & remote_adr, message const & req,
+    std::chrono::milliseconds const & wait_time, int * local_iface_index = nullptr);
+
 private:
   bool m_verbose = { false };
+  int  m_fd = { -1 };
+
+  std::string m_local_iface;
 };
 
 std::string sockaddr_to_string(sockaddr_storage const & addr);

@@ -79,7 +79,7 @@ int main(int argc, char * argv[])
     };
 
     int option_index = 0;
-    int c = getopt_long(argc, argv, "i:s:p:", long_options, &option_index);
+    int c = getopt_long(argc, argv, "i:s:p:v", long_options, &option_index);
     if (c == -1)
       break;
 
@@ -116,11 +116,14 @@ int main(int argc, char * argv[])
   }
 
   int return_status = 0;
-  stun::client client;
+
+  stun::client client(local_iface);
+  if (verbose)
+    client.set_verbose(true);
 
   try {
-    std::unique_ptr<stun::message> binding_response = client.send_binding_request(remote_server,
-      local_iface);
+    #if 1
+    std::unique_ptr<stun::message> binding_response = client.send_binding_request(remote_server);
     if (binding_response) {
       stun::attribute const * mapped_address = binding_response->find_attribute(
         stun::attribute_type::mapped_address);
@@ -136,6 +139,8 @@ int main(int argc, char * argv[])
       std::cerr << "No binding response" << std::endl;
       return_status = 2;
     }
+    #endif
+    // stun::nat_type nat_type = client.do_discovery(remote_server);
   }
   catch (std::exception const & err) {
     std::cerr << "exception:" << err.what() << std::endl;

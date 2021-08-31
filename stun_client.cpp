@@ -21,13 +21,13 @@
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <netdb.h>
+#include <net/if.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
 #include <algorithm>
-#include <chrono>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -37,11 +37,20 @@
 #include <thread>
 
 // #define _STUN_DEBUG 1
+#define _STUN_USE_MSGHDR
 
 namespace stun {
 namespace details {
   static int constexpr binding_requests_max = 9;
   static std::chrono::milliseconds binding_requests_wait_time_max(1600);
+
+  static char const * family_to_string(int family) {
+    if (family == AF_INET)
+      return "ipv4";
+    if (family == AF_INET6)
+      return "ipv6";
+    return "unknown";
+  }
 
   class file_descriptor {
   public:
@@ -102,8 +111,7 @@ namespace details {
 
     struct ifaddrs * address_list = nullptr;
     if (getifaddrs(&address_list) == -1)
-      throw_error("failed to find address for %s. %s", iface.c_str(),
-        strerror(errno));
+      details::throw_error("getifaddrs failed. %s", strerror(errno));
 
     for (auto * addr = address_list; addr != nullptr; addr = addr->ifa_next) {
       if (iface != addr->ifa_name)
@@ -120,11 +128,27 @@ namespace details {
       freeifaddrs(address_list);
 
     if (!found_iface_info)
-      throw_error("failed to find ip for interface:%s", iface.c_str());
+      details::throw_error("failed to find ip for interface:%s", iface.c_str());
 
     STUN_TRACE("local_addr:%s\n", sockaddr_to_string(iface_info).c_str());
 
     return iface_info;
+  }
+
+  uint16_t sockaddr_get_port(sockaddr_storage const & addr)
+  {
+    uint16_t port = 0;
+    if (addr.ss_family== AF_INET) {
+      sockaddr_in const * v4 = reinterpret_cast< sockaddr_in const *>(&addr);
+      port = htons(v4->sin_port);
+    }
+    else if (addr.ss_family == AF_INET6) {
+      sockaddr_in6 const * v6 = reinterpret_cast< sockaddr_in6 const *>(&addr);
+      port = htons(v6->sin6_port);
+    }
+    else
+      throw_error("can't convert address with family:%d to a string.", addr.ss_family);
+    return port;
   }
 
   std::string sockaddr_to_string2(sockaddr const * addr, int family)
@@ -151,7 +175,7 @@ namespace details {
     return std::string(buff);
   }
 
-  std::vector<sockaddr_storage> resolve_hostname(std::string const & host, uint16_t port)
+  std::vector<sockaddr_storage> resolve_hostname(std::string const & host, uint16_t port, bool v4_only)
   {
     std::vector<sockaddr_storage> addrs;
     std::set<std::string> already_seen;
@@ -170,6 +194,8 @@ namespace details {
 
     for (struct addrinfo * addr = stun_addrs; addr; addr = addr->ai_next) {
       if (addr->ai_family != AF_INET && addr->ai_family != AF_INET6)
+        continue;
+      if (v4_only && (addr->ai_family != AF_INET))
         continue;
 
       std::string const s = sockaddr_to_string2(addr->ai_addr, addr->ai_family);
@@ -207,75 +233,6 @@ namespace details {
     return 0;
   }
 
-  message * send_message(
-    file_descriptor const & soc,
-    sockaddr_storage const & remote_addr,
-    message const & req,
-    std::chrono::milliseconds const & wait_time)
-  {
-    buffer bytes = req.encode();
-
-    STUN_TRACE("remote_addr:%s\n", sockaddr_to_string(remote_addr).c_str());
-
-    #ifdef _STUN_DEBUG
-    dump_buffer("STUN >>> ", bytes);
-    #endif
-
-    ssize_t n = sendto(soc, &bytes[0], bytes.size(), 0, (sockaddr *) &remote_addr, socket_length(remote_addr));
-    if (n < 0)
-      throw_error("failed to send packet. %s", strerror(errno));
-
-    bytes.resize(0);
-    bytes.reserve(256);
-    bytes.resize(256);
-
-    sockaddr_storage from_addr = {};
-    socklen_t len = sizeof(sockaddr_storage);
-
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(soc, &rfds);
-
-    timeval timeout;
-    timeout.tv_usec = 1000 * wait_time.count();
-    timeout.tv_sec = 0;
-    int ret = select(soc + 1, &rfds, nullptr, nullptr, &timeout);
-    if (ret == 0)
-      return nullptr;
-
-    do {
-      n = recvfrom(soc, &bytes[0], bytes.size(), MSG_WAITALL, (sockaddr *) &from_addr, &len);
-    } while (n == -2 && errno == EINTR);
-
-    if (n < 0)
-      throw_error("error receiving on socket. %s", strerror(errno));
-    else
-      bytes.resize(n);
-
-    #ifdef _STUN_DEBUG
-    dump_buffer("STUN <<< ", bytes);
-    #endif
-
-    return decoder::decode_message(bytes, nullptr);
-  }
-
-  int create_udp_socket(sockaddr_storage const & remote_addr, std::string const & local_iface)
-  {
-    int soc = socket(remote_addr.ss_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-    if (soc < 0)
-      throw_error("error creating socket. %s", strerror(errno));
-    if (!local_iface.empty()) {
-      sockaddr_storage local_addr = get_interface_address(local_iface, remote_addr.ss_family);
-      int ret = bind(soc, reinterpret_cast<sockaddr const *>(&local_addr), socket_length(local_addr));
-      if (ret < 0) {
-        int err = errno;
-        close(soc);
-        throw_error("failed to bind socket to local address '%s'. %s",
-            sockaddr_to_string(local_addr).c_str(), strerror(err));
-      }
-    }
-    return soc;
-  }
 }  // end namespace details
 
 attribute const * message::find_attribute(uint16_t attr_type) const
@@ -320,11 +277,160 @@ message * message_factory::create_binding_request()
   return change_request;
 }
 
+client::client(std::string const & local_iface)
+  : m_local_iface(local_iface)
+{
+}
+
+
+client::~client()
+{
+  if (m_fd != -1)
+    close(m_fd);
+}
+
+void client::create_udp_socket(int inet_family)
+{
+  if (inet_family != AF_INET && inet_family != AF_INET6)
+    details::throw_error("invalid inet family:%d", inet_family);
+
+  verbose("creating udp/%s socket\n", details::family_to_string(inet_family));
+
+  int soc = socket(inet_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  if (soc < 0)
+    details::throw_error("error creating socket. %s", strerror(errno));
+
+  int optval = 1;
+  setsockopt(soc, IPPROTO_IP, IP_PKTINFO, &optval, sizeof(int));
+
+  if (!m_local_iface.empty()) {
+    sockaddr_storage local_addr = details::get_interface_address(m_local_iface, inet_family);
+
+    verbose("binding to local interface %s/%s\n", m_local_iface.c_str(),
+      sockaddr_to_string(local_addr).c_str());
+
+    int ret = bind(soc, reinterpret_cast<sockaddr const *>(&local_addr), details::socket_length(local_addr));
+    if (ret < 0) {
+      int err = errno;
+      close(soc);
+      details::throw_error("failed to bind socket to local address '%s'. %s",
+          sockaddr_to_string(local_addr).c_str(), strerror(err));
+    }
+    else {
+      if (m_verbose) {
+        sockaddr_storage local_endpoint;
+        socklen_t socklen = sizeof(sockaddr_storage);
+        int ret = getsockname(soc, reinterpret_cast<sockaddr *>(&local_endpoint), &socklen);
+        if (ret == 0)
+          verbose("local endpoint %s/%d\n", sockaddr_to_string(local_endpoint).c_str(),
+            details::sockaddr_get_port(local_endpoint));
+      }
+    }
+  }
+  else
+    verbose("no local interface supplied to bind to\n");
+
+  if (m_fd != -1)
+    close(m_fd);
+  m_fd = soc;
+}
+
+message * client::send_message(sockaddr_storage const & remote_addr, message const & req,
+  std::chrono::milliseconds const & wait_time, int * local_iface_index)
+{
+  buffer bytes = req.encode();
+
+  STUN_TRACE("remote_addr:%s\n", sockaddr_to_string(remote_addr).c_str());
+
+  #ifdef _STUN_DEBUG
+  dump_buffer("STUN >>> ", bytes);
+  #endif
+
+  verbose("sending messsage\n");
+
+  ssize_t n = sendto(m_fd, &bytes[0], bytes.size(), 0, (sockaddr *) &remote_addr, details::socket_length(remote_addr));
+  if (n < 0)
+    details::throw_error("failed to send packet. %s", strerror(errno));
+
+  bytes.resize(0);
+  bytes.reserve(256);
+  bytes.resize(256);
+
+  sockaddr_storage from_addr = {};
+
+  fd_set rfds;
+  FD_ZERO(&rfds);
+  FD_SET(m_fd, &rfds);
+
+  // TODO : we need to rollover the usecs into seconds
+  timeval timeout;
+  timeout.tv_usec = 1000 * wait_time.count();
+  timeout.tv_sec = 0;
+  verbose("waiting for response, timeout set to %lus %luusec\n", timeout.tv_sec, timeout.tv_usec);
+  int ret = select(m_fd + 1, &rfds, nullptr, nullptr, &timeout);
+  if (ret == 0)
+    return nullptr;
+
+  #ifdef _STUN_USE_MSGHDR
+  do {
+    //buffer control( CMSG_SPACE(sizeof(struct in_addr)) + CMSG_SPACE(sizeof(struct in_pktinfo)) + 
+    //  sizeof(struct cmsghdr) );
+    uint8_t control_data[256];
+
+    struct msghdr msg = {};
+    struct iovec iov = {};
+
+    iov.iov_base = &bytes[0];
+    iov.iov_len = bytes.size();
+
+    msg.msg_flags = 0;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control_data;
+    msg.msg_controllen = sizeof(control_data);
+    msg.msg_name = &from_addr;
+    msg.msg_namelen = sizeof(from_addr);
+
+    n = recvmsg(m_fd, &msg, 0);
+    if ((n > 0) && local_iface_index) {
+      for (cmsghdr * cptr = CMSG_FIRSTHDR(&msg); cptr; cptr = CMSG_NXTHDR(&msg, cptr)) {
+        if (cptr->cmsg_level == IPPROTO_IP) {
+          if (cptr->cmsg_type == IP_PKTINFO) {
+            in_pktinfo * info = reinterpret_cast<in_pktinfo *>(CMSG_DATA(cptr));
+            *local_iface_index = info->ipi_ifindex;
+          }
+          if (cptr->cmsg_type == IPV6_PKTINFO) {
+            in6_pktinfo * info = reinterpret_cast<in6_pktinfo *>(CMSG_DATA(cptr));
+            *local_iface_index = info->ipi6_ifindex;
+          }
+        }
+      }
+    }
+
+  } while (n < 0 && errno == EINTR);
+  #else
+  do {
+    socklen_t len = sizeof(sockaddr_storage);
+    n = recvfrom(m_fd, &bytes[0], bytes.size(), MSG_WAITALL, (sockaddr *) &from_addr, &len);
+  } while (n == -2 && errno == EINTR);
+  #endif
+
+  if (n < 0)
+    details::throw_error("error receiving on socket. %s", strerror(errno));
+  else
+    bytes.resize(n);
+
+  #ifdef _STUN_DEBUG
+  dump_buffer("STUN <<< ", bytes);
+  #endif
+
+  return decoder::decode_message(bytes, nullptr);
+}
+
 void client::verbose(char const * format, ...)
 {
   if (!m_verbose)
     return;
-
   va_list ap;
   va_start(ap, format);
   printf("STUN:");
@@ -332,31 +438,65 @@ void client::verbose(char const * format, ...)
   va_end(ap);
 }
 
-std::unique_ptr<message> client::send_binding_request(stun::server const & server, std::string const & local_iface)
+nat_type client::do_discovery(server const & srv)
 {
+  std::chrono::milliseconds wait_time(250);
+  std::vector<sockaddr_storage> addrs = details::resolve_hostname(srv.hostname, srv.port, true);
+
+  sockaddr_storage server_addr = {};
+
   std::unique_ptr<message> binding_response;
-
-  int const inet_family = AF_INET;
-
-  std::vector<sockaddr_storage> server_addresses = details::resolve_hostname(
-    server.hostname, server.port);
-  for (sockaddr_storage const & addr : server_addresses) {
-    if (addr.ss_family != inet_family)
-      continue;
-
-    std::chrono::milliseconds wait_time(250);
-
-    for (int i = 0; i < details::binding_requests_max; ++i) {
-      details::file_descriptor soc = details::create_udp_socket(addr, local_iface);
-      std::unique_ptr<message> binding_request(message_factory::create_binding_request());
-      binding_response.reset(send_message(soc, addr, *binding_request, wait_time));
-      if (binding_response)
-        break;
-      else
-        wait_time = std::min(wait_time * 2, details::binding_requests_wait_time_max);
+  for (sockaddr_storage const & addr : addrs) {
+    binding_response = this->send_binding_request(addr, wait_time);
+    if (binding_response) {
+      server_addr = addr;
+      break;
     }
+    else
+      wait_time = std::min(wait_time * 2, details::binding_requests_wait_time_max);
   }
 
+  if (!binding_response)
+    return nat_type::udp_blocked;
+
+  // get endpoint binding_request was sent from and compare to the binding_response
+  // if they're the same, run "test II".
+  sockaddr_storage local_endpoint;
+  socklen_t socklen = sizeof(sockaddr_storage);
+  int ret = getsockname(m_fd, reinterpret_cast<sockaddr *>(&local_endpoint), &socklen);
+  if (ret == -1)
+    details::throw_error("failed to get local socket name:%s", strerror(errno));
+
+  printf("length:%d\n", (int) socklen);
+  local_endpoint.ss_family = AF_INET;
+  std::string s = sockaddr_to_string(local_endpoint);
+  printf("local:%s\n", s.c_str());
+
+  return nat_type::unknown;
+}
+
+std::unique_ptr<message> client::send_binding_request(server const & srv)
+{
+  std::chrono::milliseconds wait_time(250);
+
+  std::unique_ptr<message> binding_response;
+  std::vector<sockaddr_storage> addrs = details::resolve_hostname(srv.hostname, srv.port, true);
+  for (sockaddr_storage const & addr : addrs) {
+    binding_response = this->send_binding_request(addr, wait_time);
+    if (binding_response)
+      break;
+    else
+      wait_time = std::min(wait_time * 2, details::binding_requests_wait_time_max);
+  }
+  return binding_response;
+}
+
+std::unique_ptr<message> client::send_binding_request(sockaddr_storage const & addr, 
+  std::chrono::milliseconds const & wait_time)
+{
+  this->create_udp_socket(addr.ss_family);
+  std::unique_ptr<message> binding_request(message_factory::create_binding_request());
+  std::unique_ptr<message> binding_response(this->send_message(addr, *binding_request, wait_time));
   return binding_response;
 }
 
