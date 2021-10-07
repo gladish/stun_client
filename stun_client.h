@@ -35,11 +35,12 @@ class message_factory;
 
 using buffer = std::vector<uint8_t>;
 
-enum class nat_type {
+enum class network_access_type {
   udp_blocked,
   open_internet,
+  symmetric_firewall,
   full_cone,
-  symmetric,
+  symmetric_nat,
   restricted,
   port_resricted,
   unknown
@@ -142,14 +143,19 @@ struct server {
   uint16_t port;
 };
 
+enum class protocol {
+  af_inet,
+  af_inet6
+};
+
 class client {
 public:
-  client(std::string const & local_iface);
+  client(std::string const & local_iface, protocol = protocol::af_inet);
   ~client();
 
   std::unique_ptr<message> send_binding_request(server const & srv);
 
-  nat_type do_discovery(server const & srv);
+  network_access_type discover_network_access_type(server const & srv);
 
   inline void set_verbose(bool b) {
     m_verbose = b;
@@ -167,6 +173,7 @@ private:
 private:
   bool m_verbose = { false };
   int  m_fd = { -1 };
+  protocol m_proto;
 
   std::string m_local_iface;
 };

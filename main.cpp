@@ -42,7 +42,7 @@ void print_help()
     << "local interface to use" << std::endl;
   std::cout << "  --server=<hostname|ip>  -s <hostanme|ip>  "
     << "remote server hostanem or ip address" << std::endl;
-  std::cout << "  --port=<port>           -i <port>         "
+  std::cout << "  --port=<port>           -p <port>         "
     << "remote server port number" << std::endl;
   std::cout << "  --help                  -h                "
     << "print this help" << std::endl;
@@ -55,6 +55,7 @@ int main(int argc, char * argv[])
   bool verbose = false;
   std::string local_iface;
   stun::server remote_server;
+  stun::protocol proto = stun::protocol::af_inet;
 
   std::vector< stun::server > default_stun_servers = {
     { "stun1.l.google.com", 19302 },
@@ -75,11 +76,13 @@ int main(int argc, char * argv[])
       { "port",       required_argument, 0, 'p' },
       { "help",       no_argument,       0, 'h' },
       { "verbose",    no_argument,       0, 'v' },
+      { "4",          no_argument,       0, '4' },
+      { "6",          no_argument,       0, '6' },
       { nullptr, 0, 0, 0}
     };
 
     int option_index = 0;
-    int c = getopt_long(argc, argv, "i:s:p:v", long_options, &option_index);
+    int c = getopt_long(argc, argv, "i:s:p:v46", long_options, &option_index);
     if (c == -1)
       break;
 
@@ -100,6 +103,12 @@ int main(int argc, char * argv[])
       case 'v':
         verbose = true;
         break;
+      case '4':
+        proto = stun::protocol::af_inet;
+        break;
+      case '6':
+        proto = stun::protocol::af_inet6;
+        break;
       case '?':
         break;
     }
@@ -117,7 +126,7 @@ int main(int argc, char * argv[])
 
   int return_status = 0;
 
-  stun::client client(local_iface);
+  stun::client client(local_iface, proto);
   if (verbose)
     client.set_verbose(true);
 

@@ -36,8 +36,8 @@
 #include <sstream>
 #include <thread>
 
-// #define _STUN_DEBUG 1
-#define _STUN_USE_MSGHDR
+//  #define _STUN_DEBUG 1
+// #define _STUN_USE_MSGHDR
 
 namespace stun {
 namespace details {
@@ -76,7 +76,7 @@ namespace details {
   #endif
 
   #ifdef _STUN_DEBUG
-  #define STUN_TRACE(format, ...) printf("STUN:" format, __VA_ARGS__)
+  #define STUN_TRACE(format, ...) printf("STUN:" format __VA_OPT__(,) __VA_ARGS__)
   #else
   #define STUN_TRACE(format, ...)
   #endif
@@ -175,7 +175,7 @@ namespace details {
     return std::string(buff);
   }
 
-  std::vector<sockaddr_storage> resolve_hostname(std::string const & host, uint16_t port, bool v4_only)
+  std::vector<sockaddr_storage> resolve_hostname(std::string const & host, uint16_t port, stun::protocol proto)
   {
     std::vector<sockaddr_storage> addrs;
     std::set<std::string> already_seen;
@@ -184,7 +184,7 @@ namespace details {
     int ret = getaddrinfo(host.c_str(), nullptr, nullptr, &stun_addrs);
     if (ret != 0) {
       std::stringstream error_message;
-      error_message << "getaddrinfo failed. %s";
+      error_message << "getaddrinfo failed. ";
       if (ret == EAI_SYSTEM)
         error_message << strerror(errno);
       else
@@ -192,10 +192,18 @@ namespace details {
       throw std::runtime_error(error_message.str());
     }
 
+    int protocol_family;
+    if (proto == stun::protocol::af_inet)
+      protocol_family = AF_INET;
+    else if (proto == stun::protocol::af_inet6)
+      protocol_family = AF_INET6;
+    else
+      throw std::runtime_error("invalid protocol family");
+
     for (struct addrinfo * addr = stun_addrs; addr; addr = addr->ai_next) {
       if (addr->ai_family != AF_INET && addr->ai_family != AF_INET6)
         continue;
-      if (v4_only && (addr->ai_family != AF_INET))
+      if (addr->ai_family != protocol_family)
         continue;
 
       std::string const s = sockaddr_to_string2(addr->ai_addr, addr->ai_family);
@@ -277,8 +285,9 @@ message * message_factory::create_binding_request()
   return change_request;
 }
 
-client::client(std::string const & local_iface)
-  : m_local_iface(local_iface)
+client::client(std::string const & local_iface, protocol proto)
+  : m_proto(proto)
+  , m_local_iface(local_iface)
 {
 }
 
@@ -300,8 +309,10 @@ void client::create_udp_socket(int inet_family)
   if (soc < 0)
     details::throw_error("error creating socket. %s", strerror(errno));
 
+  #ifdef _SUN_USE_MSGHDR
   int optval = 1;
   setsockopt(soc, IPPROTO_IP, IP_PKTINFO, &optval, sizeof(int));
+  #endif
 
   if (!m_local_iface.empty()) {
     sockaddr_storage local_addr = details::get_interface_address(m_local_iface, inet_family);
@@ -343,7 +354,7 @@ message * client::send_message(sockaddr_storage const & remote_addr, message con
   STUN_TRACE("remote_addr:%s\n", sockaddr_to_string(remote_addr).c_str());
 
   #ifdef _STUN_DEBUG
-  dump_buffer("STUN >>> ", bytes);
+  details::dump_buffer("STUN >>> ", bytes);
   #endif
 
   verbose("sending messsage\n");
@@ -368,9 +379,24 @@ message * client::send_message(sockaddr_storage const & remote_addr, message con
   timeout.tv_sec = 0;
   verbose("waiting for response, timeout set to %lus %luusec\n", timeout.tv_sec, timeout.tv_usec);
   int ret = select(m_fd + 1, &rfds, nullptr, nullptr, &timeout);
-  if (ret == 0)
+  if (ret == 0) {
+    STUN_TRACE("select timeout out\n");
     return nullptr;
+  }
 
+  //
+  // XXX: For discovering the network type, the first test is to run a binding request and
+  // compare the response to the local address/port combo. I was attempting to find the
+  // local address/port without an explicit bind() on the local socket fd. You can usethe
+  // recvmsg() to get the interface index where the UDP packets come in, but you can't get
+  // the port. For now, in order for the discovery to work, you have to choose a local
+  // interface name, and call bind() on the addr.
+  //
+  // At some point, I'll come back to this and check whether you can find the port without
+  // an explicit bind, possibly using sendmsg() or another option.
+  // @see [in this file] client::create_udp_socket(), there's a call to setsockopt() which
+  // enables the retrieval of the IP_PKTINFO
+  //
   #ifdef _STUN_USE_MSGHDR
   do {
     //buffer control( CMSG_SPACE(sizeof(struct in_addr)) + CMSG_SPACE(sizeof(struct in_pktinfo)) + 
@@ -395,18 +421,13 @@ message * client::send_message(sockaddr_storage const & remote_addr, message con
     if ((n > 0) && local_iface_index) {
       for (cmsghdr * cptr = CMSG_FIRSTHDR(&msg); cptr; cptr = CMSG_NXTHDR(&msg, cptr)) {
         if (cptr->cmsg_level == IPPROTO_IP) {
-          if (cptr->cmsg_type == IP_PKTINFO) {
-            in_pktinfo * info = reinterpret_cast<in_pktinfo *>(CMSG_DATA(cptr));
-            *local_iface_index = info->ipi_ifindex;
-          }
-          if (cptr->cmsg_type == IPV6_PKTINFO) {
-            in6_pktinfo * info = reinterpret_cast<in6_pktinfo *>(CMSG_DATA(cptr));
-            *local_iface_index = info->ipi6_ifindex;
-          }
+          if (cptr->cmsg_type == IP_PKTINFO)
+            *local_iface_index = reinterpret_cast<in_pktinfo *>(CMSG_DATA(cptr))->ipi_ifindex;
+          else if (cptr->cmsg_type == IPV6_PKTINFO)
+            *local_iface_index =  reinterpret_cast<in6_pktinfo *>(CMSG_DATA(cptr))->ipi6_ifindex;
         }
       }
     }
-
   } while (n < 0 && errno == EINTR);
   #else
   do {
@@ -421,7 +442,7 @@ message * client::send_message(sockaddr_storage const & remote_addr, message con
     bytes.resize(n);
 
   #ifdef _STUN_DEBUG
-  dump_buffer("STUN <<< ", bytes);
+  details::dump_buffer("STUN <<< ", bytes);
   #endif
 
   return decoder::decode_message(bytes, nullptr);
@@ -438,10 +459,10 @@ void client::verbose(char const * format, ...)
   va_end(ap);
 }
 
-nat_type client::do_discovery(server const & srv)
+network_access_type client::discover_network_access_type(server const & srv)
 {
   std::chrono::milliseconds wait_time(250);
-  std::vector<sockaddr_storage> addrs = details::resolve_hostname(srv.hostname, srv.port, true);
+  std::vector<sockaddr_storage> addrs = details::resolve_hostname(srv.hostname, srv.port, m_proto);
 
   sockaddr_storage server_addr = {};
 
@@ -457,7 +478,7 @@ nat_type client::do_discovery(server const & srv)
   }
 
   if (!binding_response)
-    return nat_type::udp_blocked;
+    return network_access_type::udp_blocked;
 
   // get endpoint binding_request was sent from and compare to the binding_response
   // if they're the same, run "test II".
@@ -472,15 +493,15 @@ nat_type client::do_discovery(server const & srv)
   std::string s = sockaddr_to_string(local_endpoint);
   printf("local:%s\n", s.c_str());
 
-  return nat_type::unknown;
+  return network_access_type::unknown;
 }
 
 std::unique_ptr<message> client::send_binding_request(server const & srv)
 {
-  std::chrono::milliseconds wait_time(250);
+  std::chrono::milliseconds wait_time(2500);
 
   std::unique_ptr<message> binding_response;
-  std::vector<sockaddr_storage> addrs = details::resolve_hostname(srv.hostname, srv.port, true);
+  std::vector<sockaddr_storage> addrs = details::resolve_hostname(srv.hostname, srv.port, m_proto);
   for (sockaddr_storage const & addr : addrs) {
     binding_response = this->send_binding_request(addr, wait_time);
     if (binding_response)
