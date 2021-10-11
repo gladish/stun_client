@@ -22,16 +22,34 @@
 #include <algorithm>
 #include <iostream>
 
+static int constexpr kDefaultNumberOfAttempts = 3;
+static int constexpr kDefaultWaitIntervalMillis = 200;
+
+template<typename T>
+T to_int(char const * s)
+{
+  long n = strtol(s, nullptr, 10);
+  if (n == LONG_MIN) {
+    // TODO
+  }
+  if (n == LONG_MAX) {
+    // TODO
+  }
+  if (n > std::numeric_limits<T>::max())
+  {
+    // TODO:
+  }
+  return static_cast<T>(n);
+}
+
+int32_t to_int32(char const * s)
+{
+  return to_int<int32_t>(s);
+}
+
 uint16_t to_uint16(char const * s)
 {
-  long int i = strtol(s, nullptr, 10);
-  if (i == LONG_MIN) { }
-
-  if (i == LONG_MAX) { }
-
-  if (i > std::numeric_limits<uint16_t>::max()) { }
-
-  return static_cast<uint16_t>(i);
+  return to_int<uint16_t>(s);
 }
 
 void print_help()
@@ -44,6 +62,14 @@ void print_help()
     << "remote server hostanem or ip address" << std::endl;
   std::cout << "  --port=<port>           -p <port>         "
     << "remote server port number" << std::endl;
+  std::cout << "  --verbose               -v                "
+    << "verbose mode" << std::endl;
+  std::cout << "  --retries=<n>           -r <n>            "
+    << "Number of times to retry. Default:" << kDefaultNumberOfAttempts << std::endl;
+  std::cout << "  --4|6                   -4|6              "
+    << "Force ipv4 or ipv6" << std::endl;
+  std::cout << "  --timeout=<ms>          -t <ms>           "
+    << "Number of milliseconds between retries. Default:" << kDefaultWaitIntervalMillis << std::endl;
   std::cout << "  --help                  -h                "
     << "print this help" << std::endl;
   std::cout << std::endl;
@@ -53,6 +79,9 @@ void print_help()
 int main(int argc, char * argv[])
 {
   bool verbose = false;
+  int num_attempts = kDefaultNumberOfAttempts;
+  int interval_wait_time = kDefaultWaitIntervalMillis;
+
   std::string local_iface;
   stun::server remote_server;
   stun::protocol proto = stun::protocol::af_inet;
@@ -76,13 +105,15 @@ int main(int argc, char * argv[])
       { "port",       required_argument, 0, 'p' },
       { "help",       no_argument,       0, 'h' },
       { "verbose",    no_argument,       0, 'v' },
+      { "retrties",   required_argument, 0, 'r' },
+      { "timeout",    required_argument, 0, 't' },
       { "4",          no_argument,       0, '4' },
       { "6",          no_argument,       0, '6' },
       { nullptr, 0, 0, 0}
     };
 
     int option_index = 0;
-    int c = getopt_long(argc, argv, "i:s:p:v46", long_options, &option_index);
+    int c = getopt_long(argc, argv, "i:s:p:v46r:t:", long_options, &option_index);
     if (c == -1)
       break;
 
@@ -109,6 +140,12 @@ int main(int argc, char * argv[])
       case '6':
         proto = stun::protocol::af_inet6;
         break;
+      case 'r':
+        num_attempts = to_int32(optarg);
+        break;
+      case 't':
+        interval_wait_time = to_int32(optarg);
+        break;
       case '?':
         break;
     }
@@ -131,25 +168,27 @@ int main(int argc, char * argv[])
     client.set_verbose(true);
 
   try {
-    #if 1
-    std::unique_ptr<stun::message> binding_response = client.send_binding_request(remote_server);
-    if (binding_response) {
-      stun::attribute const * mapped_address = binding_response->find_attribute(
-        stun::attribute_type::mapped_address);
-      if (mapped_address) {
-        sockaddr_storage wan_addr = stun::attributes::mapped_address(*mapped_address).addr();
-        std::cout << remote_server.hostname << " says:" << stun::sockaddr_to_string(wan_addr)
-          << std::endl;
+    bool done = false;
+    std::chrono::milliseconds wait_time(interval_wait_time);
+    for (int i = 0; !done && i < num_attempts; ++i) {
+      std::unique_ptr<stun::message> binding_response = client.send_binding_request(remote_server, wait_time);
+      if (binding_response) {
+        stun::attribute const * mapped_address = binding_response->find_attribute(
+            stun::attribute_type::mapped_address);
+        if (mapped_address) {
+          sockaddr_storage wan_addr = stun::attributes::mapped_address(*mapped_address).addr();
+          std::cout << remote_server.hostname << " says:" << stun::sockaddr_to_string(wan_addr)
+            << std::endl;
+          done = true;
+        } else {
+          std::cerr << "Got a binding response without any mapped address" << std::endl;
+          return_status = 1;
+        }
       } else {
-        std::cerr << "Got a binding response without any mapped address" << std::endl;
-        return_status = 1;
+        std::cerr << "No binding response" << std::endl;
+        return_status = 2;
       }
-    } else {
-      std::cerr << "No binding response" << std::endl;
-      return_status = 2;
     }
-    #endif
-    // stun::nat_type nat_type = client.do_discovery(remote_server);
   }
   catch (std::exception const & err) {
     std::cerr << "exception:" << err.what() << std::endl;

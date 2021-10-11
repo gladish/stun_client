@@ -153,7 +153,8 @@ public:
   client(std::string const & local_iface, protocol = protocol::af_inet);
   ~client();
 
-  std::unique_ptr<message> send_binding_request(server const & srv);
+  std::unique_ptr<message> send_binding_request(server const & srv,
+    std::chrono::milliseconds wait_time);
 
   network_access_type discover_network_access_type(server const & srv);
 
@@ -165,10 +166,10 @@ private:
   void create_udp_socket(int inet_family);
 
   std::unique_ptr<message> send_binding_request(sockaddr_storage const & addr,
-    std::chrono::milliseconds const & wait_time);
+    std::chrono::milliseconds wait_time);
 
   message * send_message(sockaddr_storage const & remote_adr, message const & req,
-    std::chrono::milliseconds const & wait_time, int * local_iface_index = nullptr);
+    std::chrono::milliseconds wait_time, int * local_iface_index = nullptr);
 
 private:
   bool m_verbose = { false };

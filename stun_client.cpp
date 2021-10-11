@@ -347,7 +347,7 @@ void client::create_udp_socket(int inet_family)
 }
 
 message * client::send_message(sockaddr_storage const & remote_addr, message const & req,
-  std::chrono::milliseconds const & wait_time, int * local_iface_index)
+  std::chrono::milliseconds wait_time, int * local_iface_index)
 {
   buffer bytes = req.encode();
 
@@ -373,11 +373,16 @@ message * client::send_message(sockaddr_storage const & remote_addr, message con
   FD_ZERO(&rfds);
   FD_SET(m_fd, &rfds);
 
-  // TODO : we need to rollover the usecs into seconds
   timeval timeout;
   timeout.tv_usec = 1000 * wait_time.count();
   timeout.tv_sec = 0;
-  verbose("waiting for response, timeout set to %lus %luusec\n", timeout.tv_sec, timeout.tv_usec);
+
+  constexpr decltype(timeout.tv_sec) kMicrosecondsPerSecond = 1000000;
+  if (timeout.tv_usec > kMicrosecondsPerSecond) {
+    timeout.tv_sec = (timeout.tv_usec / kMicrosecondsPerSecond);
+    timeout.tv_usec -= (timeout.tv_sec * kMicrosecondsPerSecond);
+  }
+  verbose("waiting for response, timeout set to %lus - %luus\n", timeout.tv_sec, timeout.tv_usec);
   int ret = select(m_fd + 1, &rfds, nullptr, nullptr, &timeout);
   if (ret == 0) {
     STUN_TRACE("select timeout out\n");
@@ -496,10 +501,9 @@ network_access_type client::discover_network_access_type(server const & srv)
   return network_access_type::unknown;
 }
 
-std::unique_ptr<message> client::send_binding_request(server const & srv)
+std::unique_ptr<message> client::send_binding_request(server const & srv,
+  std::chrono::milliseconds wait_time)
 {
-  std::chrono::milliseconds wait_time(2500);
-
   std::unique_ptr<message> binding_response;
   std::vector<sockaddr_storage> addrs = details::resolve_hostname(srv.hostname, srv.port, m_proto);
   for (sockaddr_storage const & addr : addrs) {
@@ -513,8 +517,9 @@ std::unique_ptr<message> client::send_binding_request(server const & srv)
 }
 
 std::unique_ptr<message> client::send_binding_request(sockaddr_storage const & addr, 
-  std::chrono::milliseconds const & wait_time)
+  std::chrono::milliseconds wait_time)
 {
+  this->verbose("sending binding request with wait time:%ld ms\n", wait_time.count());
   this->create_udp_socket(addr.ss_family);
   std::unique_ptr<message> binding_request(message_factory::create_binding_request());
   std::unique_ptr<message> binding_response(this->send_message(addr, *binding_request, wait_time));
