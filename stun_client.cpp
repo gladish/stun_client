@@ -347,7 +347,7 @@ void client::create_udp_socket(int inet_family)
 }
 
 message * client::send_message(sockaddr_storage const & remote_addr, message const & req,
-  std::chrono::milliseconds const & wait_time, int * local_iface_index)
+  std::chrono::milliseconds wait_time, int * local_iface_index)
 {
   buffer bytes = req.encode();
 
@@ -496,10 +496,9 @@ network_access_type client::discover_network_access_type(server const & srv)
   return network_access_type::unknown;
 }
 
-std::unique_ptr<message> client::send_binding_request(server const & srv)
+std::unique_ptr<message> client::send_binding_request(server const & srv,
+  std::chrono::milliseconds wait_time)
 {
-  std::chrono::milliseconds wait_time(2500);
-
   std::unique_ptr<message> binding_response;
   std::vector<sockaddr_storage> addrs = details::resolve_hostname(srv.hostname, srv.port, m_proto);
   for (sockaddr_storage const & addr : addrs) {
@@ -513,8 +512,9 @@ std::unique_ptr<message> client::send_binding_request(server const & srv)
 }
 
 std::unique_ptr<message> client::send_binding_request(sockaddr_storage const & addr, 
-  std::chrono::milliseconds const & wait_time)
+  std::chrono::milliseconds wait_time)
 {
+  this->verbose("sending binding request with wait time:%ld ms\n", wait_time.count());
   this->create_udp_socket(addr.ss_family);
   std::unique_ptr<message> binding_request(message_factory::create_binding_request());
   std::unique_ptr<message> binding_response(this->send_message(addr, *binding_request, wait_time));
